@@ -1,0 +1,5 @@
+# Only what the bot and the dashboard need (no research tools): used on the server.
+requests>=2.31
+websockets>=12
+pandas>=2.1
+numpy>=1.26

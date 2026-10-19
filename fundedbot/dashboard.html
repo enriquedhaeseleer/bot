@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FundedBot Dashboard</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: control room — status bar with controls, KPI row, risk meters, position + legs, signals, trades, log */
+:root {
+  --bg: #f3f4f2; --panel: #ffffff; --fg: #18201c; --muted: #637069; --line: #dce1dd; --grid: #eaedea;
+  --accent: #c27a12; --up: #1f7a4d; --down: #b4383a; --warn: #9a6b0e;
+  --up-bg: #dff0e6; --down-bg: #f6e0df; --warn-bg: #f6ecd2;
+  --sans: "IBM Plex Sans", system-ui, sans-serif; --mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) { :root {
+  --bg: #101412; --panel: #181d1a; --fg: #e5eae6; --muted: #8e9993; --line: #2a312d; --grid: #212724;
+  --accent: #e6a243; --up: #4cc38a; --down: #ef6b6d; --warn: #e0c062;
+  --up-bg: #163020; --down-bg: #3a1c1c; --warn-bg: #352d16; color-scheme: dark } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--sans); font-size: 14px; line-height: 1.5; }
+.wrap { max-width: 1240px; margin: 0 auto; padding: 18px 16px 48px; display: grid; gap: 16px; }
+.bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; padding: 12px 16px; }
+.bar h1 { font-size: 18px; margin: 0; font-weight: 700; }
+.pill { font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 99px; border: 1px solid var(--line); white-space: nowrap; }
+.pill.sandbox { color: var(--warn); background: var(--warn-bg); border-color: transparent; }
+.pill.live { color: #fff; background: var(--down); border-color: transparent; }
+.pill.on { color: var(--up); background: var(--up-bg); border-color: transparent; }
+.pill.off { color: var(--muted); }
+.acct { color: var(--muted); }
+.spacer { flex: 1; }
+button { font: inherit; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); padding: 6px 12px; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+button.danger { color: var(--down); border-color: var(--down); }
+button:disabled { opacity: .45; cursor: default; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.msg { padding: 10px 14px; border-radius: 6px; background: var(--warn-bg); color: var(--warn); }
+.msg.err { background: var(--down-bg); color: var(--down); }
+.msg.ok { background: var(--up-bg); color: var(--up); }
+.kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 900px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+.kpi b { display: block; font-family: var(--mono); font-size: 21px; font-weight: 500; }
+.kpi span { color: var(--muted); font-size: 12px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; min-width: 0; }
+h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 500; margin: 0 0 12px; }
+.grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+@media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+.meter { display: grid; gap: 6px; margin-bottom: 16px; }
+.meter:last-child { margin-bottom: 0; }
+.meter .top { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; }
+.meter .top span:last-child { font-family: var(--mono); color: var(--muted); }
+.track { position: relative; height: 12px; background: var(--grid); border-radius: 6px; overflow: hidden; }
+.fill { position: absolute; inset: 0 auto 0 0; border-radius: 6px; background: var(--up); transition: width .4s; }
+.fill.mid { background: var(--warn); } .fill.bad { background: var(--down); }
+.mark { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--fg); }
+.meter small { color: var(--muted); font-size: 12px; }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { padding: 6px 9px; text-align: left; white-space: nowrap; border-bottom: 1px solid var(--grid); }
+th { color: var(--muted); font-weight: 500; font-size: 12px; }
+td.n { font-family: var(--mono); text-align: right; } th.n { text-align: right; }
+td.pos { color: var(--up); } td.neg { color: var(--down); }
+.empty { color: var(--muted); font-size: 13px; }
+.sig { font-weight: 600; } .sig.l { color: var(--up); } .sig.s { color: var(--down); } .sig.z { color: var(--muted); }
+pre { margin: 0; font-family: var(--mono); font-size: 12px; line-height: 1.45; max-height: 340px; overflow: auto; white-space: pre-wrap;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 10px; }
+.emergency { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.emergency input { font: inherit; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); width: 120px; }
+.foot { color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <h1>FundedBot</h1>
+    <span class="pill" id="mode">…</span>
+    <span class="acct" id="acct">account laden…</span>
+    <span class="pill off" id="stage">–</span>
+    <span class="spacer"></span>
+    <span class="pill off" id="botpill">bot: onbekend</span>
+    <button class="primary" id="start">Bot starten</button>
+    <button id="dry">Dry-run</button>
+    <button id="stop">Stoppen</button>
+  </div>
+
+  <div id="msgs"></div>
+
+  <section class="kpis" id="kpis"></section>
+
+  <section class="grid2">
+    <div class="panel">
+      <h2>Risico</h2>
+      <div id="meters"></div>
+    </div>
+    <div class="panel">
+      <h2>Positie en legs</h2>
+      <div id="position"></div>
+    </div>
+  </section>
+
+  <section class="grid2">
+    <div class="panel">
+      <h2>Signalen per strategie <span id="price" style="text-transform:none;letter-spacing:0"></span></h2>
+      <div class="tablewrap"><table id="signals"></table></div>
+    </div>
+    <div class="panel">
+      <h2>Recente trades</h2>
+      <div class="tablewrap" style="max-height:300px;overflow:auto"><table id="trades"></table></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Logboek van de bot</h2>
+    <pre id="log">nog geen logregels</pre>
+  </section>
+
+  <section class="panel">
+    <h2>Noodknop</h2>
+    <div class="emergency">
+      <span>Stopt de bot, annuleert alle orders en sluit alle posities op dit account.</span>
+      <label for="confirm" class="foot">Typ SLUIT:</label>
+      <input id="confirm" autocomplete="off">
+      <button class="danger" id="closeall" disabled>Alles sluiten</button>
+    </div>
+  </section>
+
+  <p class="foot">Draait alleen op deze computer. De bot loopt door als je dit dashboard sluit, en houdt de pc wakker zolang hij draait. Gegevens verversen elke 10 seconden. Tijden in jouw tijdzone.</p>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const usd = (v, d = 0) => v == null ? "–" : (v < 0 ? "-$" : "$") + Math.abs(v).toLocaleString("nl-BE", {minimumFractionDigits: d, maximumFractionDigits: d});
+const pct = (v, d = 1) => v == null ? "–" : (v * 100).toFixed(d).replace(".", ",") + "%";
+const time = ms => ms ? new Date(ms).toLocaleString("nl-BE", {day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"}) : "–";
+const STAGE = {evaluation: "challenge", funded: "funded"};
+let O = null;
+
+async function get(u) { const r = await fetch(u, {cache: "no-store"}); const j = await r.json(); if (!r.ok) throw new Error(j.error || r.status); return j; }
+async function post(u, body) {
+  const r = await fetch(u, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body || {})});
+  return r.json();
+}
+function flash(text, kind) { $("msgs").innerHTML = `<div class="msg ${kind || ""}">${text}</div>`; setTimeout(() => { if (O) renderMsgs(); }, 6000); }
+
+function meter(label, used, limit, mark, markLabel, detail) {
+  const f = limit > 0 ? Math.max(0, Math.min(1, used / limit)) : 0;
+  const cls = mark && f >= mark ? "bad" : f >= (mark || 1) * 0.6 ? "mid" : "";
+  return `<div class="meter"><div class="top"><span>${label}</span><span>${detail}</span></div>
+    <div class="track"><div class="fill ${cls}" style="width:${(f * 100).toFixed(1)}%"></div>${mark ? `<div class="mark" style="left:${mark * 100}%" title="${markLabel}"></div>` : ""}</div>
+    ${markLabel ? `<small>${markLabel}</small>` : ""}</div>`;
+}
+
+function renderMsgs() {
+  const o = O, out = [];
+  if (o.bot_state.done) out.push(`<div class="msg ok">Challenge gehaald: de bot is gestopt. Start hem opnieuw voor het funded account.</div>`);
+  if (o.bot_state.payout_reached) out.push(`<div class="msg ok">+${(o.config.payout_target * 100).toFixed(0)}% gehaald: vraag de uitbetaling aan op de website. De bot handelt niet meer op dit account.</div>`);
+  if (o.bot_state.locked_day) out.push(`<div class="msg">Daily guard geraakt op ${o.bot_state.locked_day}: geen nieuwe trades tot middernacht New Yorkse tijd.</div>`);
+  if (o.stuck) out.push(`<div class="msg">Te dicht bij de max-loss-grens: de bot opent geen nieuwe trades meer.</div>`);
+  if (o.blockers.length && !o.bot_state.locked_day) out.push(`<div class="msg">Geen nieuwe trades: ${o.blockers.join("; ")}</div>`);
+  if (o.bot.running && o.bot.heartbeat_s > 120) out.push(`<div class="msg err">De bot draait, maar is al ${Math.round(o.bot.heartbeat_s / 60)} minuten niet actief geweest. Kijk in het logboek.</div>`);
+  $("msgs").innerHTML = out.join("");
+}
+
+function render() {
+  const o = O, a = o.account, L = o.levels, r = o.rules, start = a.starting_balance;
+  $("mode").textContent = o.mode; $("mode").className = "pill " + (o.mode === "LIVE" ? "live" : "sandbox");
+  $("acct").textContent = `${a.name} · ${a.account_number || ""}`;
+  $("stage").textContent = (STAGE[a.stage] || a.stage) + (a.status !== "active" ? ` · ${a.status}` : "");
+  const b = o.bot, hb = b.heartbeat_s;
+  const stale = b.running && hb != null && hb > 120;
+  $("botpill").textContent = !b.running ? "bot staat stil"
+    : stale ? `bot reageert niet (${Math.round(hb / 60)} min geen hartslag)` : `bot draait (${b.mode}) · ${hb == null ? "start op" : Math.round(hb) + " s geleden actief"}`;
+  $("botpill").className = "pill " + (b.running && !stale ? "on" : "off");
+  $("start").disabled = $("dry").disabled = b.running;
+  $("stop").disabled = !b.running;
+  $("start").textContent = o.mode === "LIVE" ? "Bot starten (LIVE)" : "Bot starten";
+
+  const eq = a.equity, prof = eq - start;
+  const tgtUsd = L.target_equity - start;
+  $("kpis").innerHTML = [
+    [usd(a.balance, 2), "balans"],
+    [usd(eq, 2), `equity · ${prof >= 0 ? "+" : ""}${usd(prof)} sinds start`],
+    [o.today_pnl == null ? "–" : (o.today_pnl >= 0 ? "+" : "") + usd(o.today_pnl), "vandaag (sinds middernacht NY)"],
+    [pct(Math.max(0, prof) / tgtUsd, 0), `naar ${a.stage === "funded" ? "uitbetaling" : "target"} (${usd(L.target_equity)})`],
+    [o.bot_state.trades_today ?? 0, `trades vandaag · laatste ${time(o.bot_state.last_trade_ms)}`],
+  ].map(([v, t]) => `<div class="kpi"><b>${v}</b><span>${t}</span></div>`).join("");
+
+  const dllUsd = r.daily_loss_pct * start, mddUsd = r.max_drawdown_pct * start;
+  const dayUsed = Math.max(0, -(o.today_pnl || 0)), ddUsed = Math.max(0, start - eq);
+  $("meters").innerHTML =
+    meter("Daily loss gebruikt", dayUsed, dllUsd, o.config.daily_guard,
+          `de bot stopt de dag bij ${usd(o.config.daily_guard * dllUsd)} verlies (${Math.round(o.config.daily_guard * 100)}%), de grens van het platform is ${usd(dllUsd)}`,
+          `${usd(dayUsed)} van ${usd(dllUsd)}`) +
+    meter("Max loss gebruikt", ddUsed, mddUsd, 0.9, `account vervalt onder ${usd(L.dd_floor)}`, `${usd(ddUsed)} van ${usd(mddUsd)}`) +
+    meter(a.stage === "funded" ? "Naar de uitbetaling" : "Naar het target", Math.max(0, prof), tgtUsd, null, "", `${usd(Math.max(0, prof))} van ${usd(tgtUsd)}`);
+
+  const legs = Object.entries(o.bot_state.legs || {});
+  const posRows = o.positions.map(p => `<tr><td>${p.symbol}</td><td>${p.side === "long" ? "▲ long" : "▼ short"}</td><td class="n">${p.size}</td><td class="n">${usd(p.entry_price, 1)}</td><td>${time(p.opened_at)}</td></tr>`).join("");
+  const legRows = legs.map(([k, l]) => `<tr><td>${k}</td><td>${l.side > 0 ? "▲ long" : "▼ short"}</td><td class="n">${l.size}</td><td class="n">${usd(l.entry, 1)}</td><td class="n">${usd(l.stop, 1)}</td><td class="n">${l.tp ? usd(l.tp, 1) : "trailing"}</td></tr>`).join("");
+  $("position").innerHTML =
+    (o.positions.length ? `<div class="tablewrap"><table><thead><tr><th>Market</th><th>Kant</th><th class="n">Size</th><th class="n">Gem. entry</th><th>Geopend</th></tr></thead><tbody>${posRows}</tbody></table></div>`
+                        : `<p class="empty">Geen open positie.</p>`) +
+    (legs.length ? `<h2 style="margin-top:14px">Legs van de bot</h2><div class="tablewrap"><table><thead><tr><th>Leg</th><th>Kant</th><th class="n">Size</th><th class="n">Entry</th><th class="n">Stop</th><th class="n">Target</th></tr></thead><tbody>${legRows}</tbody></table></div>
+                   <p class="foot" style="margin:8px 0 0">Stop op de server: ${o.bot_state.protect_px ? usd(o.bot_state.protect_px, 1) + " voor " + o.bot_state.protect_size + " BTC" : "–"}</p>` : "");
+  renderMsgs();
+}
+
+async function loadOverview() {
+  try { O = await get("/api/overview"); render(); }
+  catch (e) { $("msgs").innerHTML = `<div class="msg err">Kan het account niet lezen: ${e.message}</div>`; }
+}
+async function loadSignals() {
+  try {
+    const s = await get("/api/signals");
+    $("price").textContent = s.price ? `· BTC ${usd(s.price)}` : "";
+    $("signals").innerHTML = `<thead><tr><th>Strategie</th><th>Fase</th><th>Laatste candle</th><th>Signaal</th><th class="n">Stopafstand</th></tr></thead><tbody>` +
+      s.legs.map(l => `<tr><td>${l.name}</td><td>${l.stage}</td><td>${l.candle ? new Date(l.candle).toLocaleString("nl-BE", {day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"}) + " (" + l.tf + ")" : "–"}</td>
+        <td class="sig ${l.side > 0 ? "l" : l.side < 0 ? "s" : "z"}">${l.side > 0 ? "▲ long" : l.side < 0 ? "▼ short" : "geen"}</td><td class="n">${usd(l.stop_dist)}</td></tr>`).join("") + "</tbody>";
+  } catch (e) { $("signals").innerHTML = `<tr><td class="empty">Signalen niet beschikbaar: ${e.message}</td></tr>`; }
+}
+async function loadTrades() {
+  try {
+    const t = await get("/api/trades?n=30");
+    $("trades").innerHTML = t.length ? `<thead><tr><th>Gesloten</th><th>Kant</th><th class="n">Size</th><th class="n">Entry</th><th class="n">Exit</th><th>Reden</th><th class="n">Netto</th></tr></thead><tbody>` +
+      t.map(x => `<tr><td>${time(x.closed_at)}</td><td>${x.side}</td><td class="n">${x.size}</td><td class="n">${usd(x.entry, 1)}</td><td class="n">${usd(x.exit, 1)}</td><td>${x.reason || ""}</td>
+        <td class="n ${(x.pnl || 0) >= 0 ? "pos" : "neg"}">${x.pnl == null ? "–" : usd(x.pnl, 2)}</td></tr>`).join("") + "</tbody>"
+      : `<tr><td class="empty">Nog geen gesloten trades.</td></tr>`;
+  } catch (e) { $("trades").innerHTML = `<tr><td class="empty">${e.message}</td></tr>`; }
+}
+async function loadLog() {
+  try {
+    const lines = await get("/api/log"), el = $("log"), atEnd = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
+    el.textContent = lines.length ? lines.join("") : "nog geen logregels";
+    if (atEnd) el.scrollTop = el.scrollHeight;
+  } catch (e) {}
+}
+
+$("start").onclick = async () => {
+  if (O && O.mode === "LIVE" && !confirm("De bot LIVE starten, met echt geld?")) return;
+  const r = await post("/api/bot/start", {dry: false}); flash(r.message, r.ok ? "ok" : "err"); loadOverview();
+};
+$("dry").onclick = async () => { const r = await post("/api/bot/start", {dry: true}); flash(r.message, r.ok ? "ok" : "err"); loadOverview(); };
+$("stop").onclick = async () => { const r = await post("/api/bot/stop"); flash(r.message, r.ok ? "ok" : "err"); loadOverview(); };
+$("confirm").oninput = () => { $("closeall").disabled = $("confirm").value.trim() !== "SLUIT"; };
+$("closeall").onclick = async () => {
+  const r = await post("/api/close-all", {confirm: $("confirm").value.trim()});
+  $("confirm").value = ""; $("closeall").disabled = true; flash(r.message, r.ok ? "ok" : "err"); loadOverview(); loadTrades();
+};
+
+loadOverview(); loadSignals(); loadTrades(); loadLog();
+setInterval(loadOverview, 10000); setInterval(loadSignals, 60000); setInterval(loadTrades, 30000); setInterval(loadLog, 5000);
+</script>
+</body>
+</html>
