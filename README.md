@@ -16,7 +16,7 @@ De bot werkt anders tijdens de challenge dan wanneer je funded bent. Hij leest d
 - **Meerdere "legs" in één BTC-positie.** Elke leg heeft een eigen stop en target. De exchange houdt per market maar één netto positie, dus:
   - een leg sluit alleen zijn eigen deel van de positie;
   - een leg opent nooit tegen de bestaande positie in;
-  - op de server staat altijd één reduce-only stop voor de hele positie, op het gewogen gemiddelde van de leg-stops. Valt je pc uit, dan verlies je nooit meer dan alle leg-stops samen.
+  - op de server staat altijd één stop-loss voor de hele positie, op het gewogen gemiddelde van de leg-stops. Die stop gaat mee met elke instap-order (`stop_loss_price`, met `replace_overlapping_exits` als er al een positie staat). Trailing en het sluiten van één leg passen hem aan via `PUT /v1/positions/{id}/exit-orders`. Een losse reduce-only stop-order weigert MFP. Valt je pc uit, dan verlies je nooit meer dan alle leg-stops samen.
   - Lukt het niet om die stop te plaatsen, dan sluit de bot alles meteen. Een positie staat nooit onbeschermd open.
 - **Risk-manager** (`fundedbot/risk.py`). Alle limieten worden afgeleid van de floors die de server zelf rapporteert:
   - Als 60% van de daily-loss-ruimte op is: alles sluiten en pauze tot middernacht New Yorkse tijd. **Er blijft dus altijd 40% van je daily loss vrij.**
@@ -24,6 +24,7 @@ De bot werkt anders tijdens de challenge dan wanneer je funded bent. Hij leest d
   - Elke nieuwe leg riskeert hooguit de helft van de ruimte die tot die grens over is. Alle stops samen kunnen die 60%-grens dus niet passeren.
   - Maximaal 5x totale leverage (BTC staat 10x toe) en maximaal 12 trades per dag.
   - Geen nieuwe trades bij een payout in behandeling, trading halt, reduce-only-restrictie, onvolledige marks, of een BTC-positie die niet van de bot is.
+- **Gemiste signalen.** Sloot een candle terwijl de bot niet draaide (herstart, nieuwe deploy), dan neemt hij dat signaal alsnog zolang de volgende candle van die timeframe nog loopt, en alleen als de prijs minder dan één stopafstand verder staat. Elk signaal wordt maar één keer genomen.
 - **Inactiviteitsregel.** Een account vervalt zonder trade binnen 30 dagen (challenge) of 7 dagen (funded). Is de strategie zo lang stil, dan doet de bot de kleinste mogelijke trade en sluit die meteen: na 25 dagen in de challenge, na 6 dagen funded.
 - **Na de uitbetaling** ligt de max loss op je startbalans en is er geen ruimte meer. De bot handelt dan niet meer op dat account. Je koopt een nieuwe challenge.
 
@@ -63,9 +64,9 @@ Alle onderzoeksstappen staan in `research/` en in `research/results/research_log
 
 Logs komen in `bot.log`, de status in `state.json` (bij een dry-run vanuit het dashboard: `state_dryrun.json`). Trade niet handmatig BTC op het account dat de bot gebruikt.
 
-**Controleer in de sandbox eerst deze punten.** De docs zeggen er niets duidelijks over:
-- of de reduce-only `stop_market` voor de hele positie wordt geaccepteerd (zie `bot.log`: "beschermende stop op de server");
-- of het aanpassen van die stop met `PATCH /v1/orders/{id}` werkt (anders plaatst de bot hem opnieuw);
+**Controleer in de sandbox eerst deze punten:**
+- dat na een instap in `bot.log` staat: "gevuld ... stop op de server @ ...", en niet "KAN POSITIE NIET BESCHERMEN";
+- dat het verschuiven van de stop (trailing) werkt: "beschermende stop op de server: ...";
 - of fills en fees overeenkomen met de simulatie.
 
 Na het halen van de challenge stopt de bot. Start hem opnieuw zodra je funded account actief is. Pas eventueel `FP_ACCOUNT_ID` aan.

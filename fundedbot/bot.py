@@ -3,8 +3,9 @@
 Mirrors research/sim.py (run_fast with no_hedge=True):
   * every 15m candle close: trail the stops of open legs, then let legs whose candle just closed enter;
   * each leg has its own stop / target; the bot closes that leg's size when its level is crossed;
-  * the exchange holds one reduce-only stop for the whole position at the size-weighted average of the
-    leg stops, so a crash of this program can never lose more than all leg stops together;
+  * the exchange holds one stop-loss for the whole position at the size-weighted average of the leg
+    stops (attached to every entry, then kept up to date through the position's exit-orders endpoint),
+    so a crash of this program can never lose more than all leg stops together;
   * no leg may open against the current position (the exchange nets one position per market).
 Challenge stage: CHALLENGE_LEGS with challenge_risk. Funded: FUNDED_LEGS with funded_risk, and at
 +payout_target everything is closed so you can request the payout on the website.
@@ -63,6 +64,7 @@ class State:
         self.notified: dict[str, str] = d.get("notified", {})
         self.done: bool = d.get("done", False)
         self.account_id: str | None = d.get("account_id")
+        self.seen: dict[str, int] = d.get("seen", {})  # leg -> open time (ms) of the last candle evaluated
 
     def save(self):
         tmp = self.path.with_suffix(".tmp")
@@ -296,7 +298,8 @@ class Bot:
         if pos is None:
             return False  # nothing left on the exchange; _reconcile clears the legs
         try:
-            o = self.api.close_position(pos["id"], size=size, client_order_id=f"x-{name}-{L['opened_ms']}")
+            o = self.api.close_position(pos["id"], expected_price=px, size=size,
+                                        client_order_id=f"x-{name}-{L['opened_ms']}")
             o = self.api.wait_order(o["id"])
         except ApiError as e:
             log.error("%s: sluiten mislukt: %s", name, e)
@@ -376,7 +379,10 @@ class Bot:
                 log.info("%s: trailing stop %.1f -> %.1f", name, L["stop"], new)
                 L["stop"] = new
 
-        # 2) entries of legs whose candle closed at this boundary
+        # 2) entries of legs whose candle closed at this boundary (or closed while the bot was not running)
+        for lg in legs_cfg:
+            if self._leg_closed_now(frames[lg.tf], lg, boundary):
+                st.seen[lg.name] = int(frames[lg.tf].index[-1].timestamp() * 1000)
         if rs.can_open:
             self._entries(rs, legs_cfg, frames, boundary, close)
         elif any(self._leg_closed_now(frames[lg.tf], lg, boundary) for lg in legs_cfg) and rs.blockers:
@@ -393,6 +399,14 @@ class Bot:
     def _leg_closed_now(df: pd.DataFrame, lg, boundary: pd.Timestamp) -> bool:
         return not df.empty and df.index[-1] + td(lg.tf) == boundary
 
+    def _missed(self, df: pd.DataFrame, lg, boundary: pd.Timestamp) -> bool:
+        """The leg's last candle closed while the bot was not evaluating it (down, restarting, a deploy, a
+        failed start) and the next candle of that timeframe has not closed yet: its signal may still count."""
+        if df.empty:
+            return False
+        return (self.state.seen.get(lg.name, 0) < int(df.index[-1].timestamp() * 1000)
+                and boundary < df.index[-1] + 2 * td(lg.tf))
+
     def _entries(self, rs, legs_cfg, frames, boundary, close):
         st, rp = self.state, self.cfg.risk
         halted = ((self.policy or {}).get("trading_halt") or {}).get("categories") or []
@@ -400,12 +414,24 @@ class Bot:
             if lg.name in st.legs:
                 continue
             df = frames[lg.tf]
-            if not self._leg_closed_now(df, lg, boundary):
+            on_time = self._leg_closed_now(df, lg, boundary)
+            if not on_time and not self._missed(df, lg, boundary):
                 continue
+            st.seen[lg.name] = int(df.index[-1].timestamp() * 1000)
             sig = latest(df, lg)
             if sig is None or sig.side == 0:
                 continue
             side = "buy" if sig.side > 0 else "sell"
+            if not on_time:
+                # a missed signal is taken late only while the price is less than one stop distance away
+                at = (sig.candle_time + td(lg.tf)).strftime("%d-%m %H:%M UTC")
+                drift = sig.side * (close - sig.price)
+                if not -sig.stop_dist < drift < sig.stop_dist:
+                    log.info("%s: gemist signaal %s van %s overgeslagen: de prijs is al %+.0f verder",
+                             lg.name, side, at, drift)
+                    continue
+                log.info("%s: signaal %s van %s gemist (bot draaide toen niet); wordt alsnog genomen",
+                         lg.name, side, at)
             if len(st.legs) >= len(legs_cfg):
                 break
             if any(L["side"] == -sig.side for L in st.legs.values()):
@@ -417,10 +443,16 @@ class Bot:
             if sz.size <= 0:
                 log.info("%s: signaal %s overgeslagen: %s", lg.name, side, sz.reason)
                 continue
-            coid = f"{lg.name}-{int(sig.candle_time.timestamp())}"
+            coid = f"{lg.name}-{int(sig.candle_time.timestamp())}" + ("" if on_time else "-late")
+            # the stop travels with the order: the weighted average of all legs including this one; it covers
+            # the whole resulting position, so it replaces the stop of the legs already open
+            planned = list(st.legs.values()) + [{"size": sz.size, "stop": close - sig.side * sig.stop_dist}]
+            avg_stop = self._round_px(sum(L["size"] * L["stop"] for L in planned) / sum(L["size"] for L in planned))
             body = {"client_order_id": coid, "type": "market", "account_id": self.account_id,
                     "market_id": self.mid, "side": side, "size": sz.size, "expected_price": close,
-                    "leverage": sz.leverage, "margin_mode": "cross"}
+                    "leverage": sz.leverage, "margin_mode": "cross", "stop_loss_price": avg_stop}
+            if st.legs:
+                body["replace_overlapping_exits"] = True
             log.info("%s: %s %.4f BTC @ ~%.1f  stop %.1f  %s  risico $%.2f%s", lg.name, side.upper(), sz.size,
                      close, close - sig.side * sig.stop_dist,
                      f"target {close + sig.side * sig.tp_dist:.1f}" if sig.tp_dist else "trailing",
@@ -447,21 +479,31 @@ class Bot:
             st.trades_today += 1
             st.last_trade_ms = now_ms()
             rs.open_risk += size * sig.stop_dist
-            log.info("%s: gevuld %.4f @ %.1f (fee %s)", lg.name, size, fill, order.get("fee"))
+            if order.get("stop_loss_order_id"):
+                st.protect_id = order["stop_loss_order_id"]
+            st.protect_px, st.protect_size = avg_stop, sum(L["size"] for L in st.legs.values())
+            log.info("%s: gevuld %.4f @ %.1f (fee %s), stop op de server @ %.1f", lg.name, size, fill,
+                     order.get("fee"), avg_stop)
             # protect right away, not only at the end of the bar
             if not self._update_protection():
                 return
 
     # ------------------------------------------------------------------ exchange-side protection
+    def _round_px(self, px: float) -> float:
+        return round(px, int(self.market.get("price_decimals", 1)))
+
     def _cancel_protection(self):
+        """Forget the stop: a reduce-only exit is cancelled by the exchange once the position is flat."""
         st = self.state
-        if st.protect_id and not self.cfg.dry_run:
-            try:
-                self.api.cancel_order(st.protect_id)
-            except ApiError as e:
-                if e.status != 409:  # 409: already filled or canceled
-                    log.warning("beschermende stop annuleren mislukt: %s", e)
         st.protect_id, st.protect_px, st.protect_size = None, 0.0, 0.0
+
+    def _exits(self) -> list[dict]:
+        return [o for o in self.api.working_orders(self.account_id)
+                if o.get("market_id") == self.mid and o.get("reduce_only")]
+
+    @staticmethod
+    def _is_sl(o: dict) -> bool:
+        return o.get("bracket_role") == "stop_loss" or o.get("type") in ("stop_market", "stop_limit")
 
     def _update_protection(self) -> bool:
         """One reduce-only stop for the whole position at the size-weighted average leg stop.
@@ -472,35 +514,38 @@ class Bot:
             self._cancel_protection()
             return True
         size = sum(L["size"] for L in st.legs.values())
-        side = next(iter(st.legs.values()))["side"]
-        avg = sum(L["size"] * L["stop"] for L in st.legs.values()) / size
-        avg = round(avg, int(self.market.get("price_decimals", 1)))
-        if st.protect_id and math.isclose(avg, st.protect_px) and abs(size - st.protect_size) < self.step / 2:
-            return True
+        avg = self._round_px(sum(L["size"] * L["stop"] for L in st.legs.values()) / size)
         if self.cfg.dry_run:
             st.protect_px, st.protect_size = avg, size
             return True
-        if st.protect_id:
-            try:
-                self.api.modify_order(st.protect_id, price=avg, size=size)
-                st.protect_px, st.protect_size = avg, size
-                return True
-            except ApiError as e:
-                log.info("beschermende stop aanpassen ging niet (%s), opnieuw plaatsen", e.code)
-                self._cancel_protection()
-        body = {"client_order_id": f"protect-{now_ms()}", "type": "stop_market", "account_id": self.account_id,
-                "market_id": self.mid, "side": "sell" if side > 0 else "buy", "size": size,
-                "leverage": self.cfg.risk.order_leverage, "margin_mode": "cross", "reduce_only": True,
-                "trigger_price": avg, "trigger_market_id": self.mid,
-                "trigger_direction": "below" if side > 0 else "above"}
         try:
-            o = self.api.place_order(body, idem=body["client_order_id"])
+            pos = self._position()
+            if pos is None:
+                return True  # nothing to protect; _reconcile clears the legs
+            exits = self._exits()
+            sl = [o for o in exits if self._is_sl(o)]
+            if (len(sl) == 1 and math.isclose(float(sl[0].get("trigger_price") or 0), avg)
+                    and abs(float(sl[0]["size"]) - float(pos["size"])) < self.step / 2):
+                st.protect_id, st.protect_px, st.protect_size = sl[0]["id"], avg, size
+                return True
+            pos_size = float(pos["size"])
+            if sl:
+                ops = [{"kind": "modify", "order_id": sl[0]["id"], "price": avg, "size": pos_size}]
+                ops += [{"kind": "cancel", "order_id": o["id"]} for o in sl[1:]]
+            else:
+                ops = [{"kind": "place", "group": "sl", "price": avg, "size": pos_size, "execution_type": "market"}]
+            expected = [{"order_id": o["id"], "price": float(o.get("trigger_price") or o.get("limit_price") or 0),
+                         "size": float(o["size"])} for o in exits]
+            self.api.update_exits(pos["id"], {"expected_position_size": pos_size, "expected_orders": expected,
+                                              "operations": ops})
+            new_sl = [o for o in self._exits() if self._is_sl(o)]
         except ApiError as e:
             log.error("KAN POSITIE NIET BESCHERMEN (%s %s): alles wordt gesloten",
                       e, e.body.get("error", {}).get("details", ""))
             self._flatten()
             return False
-        st.protect_id, st.protect_px, st.protect_size = o["id"], avg, size
+        st.protect_id = new_sl[0]["id"] if new_sl else None
+        st.protect_px, st.protect_size = avg, size
         log.info("beschermende stop op de server: %.4f BTC @ %.1f", size, avg)
         return True
 
@@ -537,7 +582,12 @@ class Bot:
             st.last_trade_ms = now_ms()
             pos = self._position()
             if pos is not None:
-                self.api.wait_order(self.api.close_position(pos["id"], client_order_id=f"{coid}-x")["id"])
+                try:
+                    self.api.wait_order(self.api.close_position(pos["id"], expected_price=px,
+                                                                client_order_id=f"{coid}-x")["id"])
+                except ApiError as e:
+                    log.error("keep-alive positie sluiten mislukt (%s): alles wordt gesloten", e)
+                    self._flatten()
 
     def _flatten(self):
         st = self.state

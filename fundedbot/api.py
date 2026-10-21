@@ -91,6 +91,14 @@ class Client:
                 break
         return out
 
+    def working_orders(self, account_id: str) -> list[dict]:
+        """All pending and resting orders of the account (entries and TP/SL exits)."""
+        return self._req("GET", "/v1/orders", params={"account_id": account_id, "status": "working"})["data"]
+
+    def update_exits(self, position_id: str, body: dict) -> dict:
+        """Atomically place / modify / cancel the TP and SL orders of one position."""
+        return self._req("PUT", f"/v1/positions/{position_id}/exit-orders", json=body, idem=str(uuid.uuid4()))["data"]
+
     def order(self, order_id: str) -> dict:
         return self._req("GET", f"/v1/orders/{order_id}")["data"]
 
@@ -102,10 +110,10 @@ class Client:
     def place_order(self, body: dict, idem: str | None = None) -> dict:
         return self._req("POST", "/v1/orders", json=body, idem=idem or str(uuid.uuid4()))["data"]
 
-    def close_position(self, position_id: str, size: float | None = None,
+    def close_position(self, position_id: str, expected_price: float, size: float | None = None,
                        client_order_id: str | None = None) -> dict:
-        """Reduce-only market close; omit size for the full position."""
-        body: dict = {"type": "market"}
+        """Reduce-only market close; omit size for the full position. MFP requires expected_price here."""
+        body: dict = {"type": "market", "expected_price": expected_price}
         if size is not None:
             body["size"] = size
         if client_order_id:
