@@ -4,6 +4,8 @@ Shows the account, how much of the daily / max loss is used, the bot's legs and 
 signals, recent trades and the bot log, and can start / stop the bot or close everything.
 It only listens on this computer; the API key never leaves the Python process. The bot runs as its own
 process (bot.pid / bot.stop, see proc.py), so it keeps running when the dashboard is closed.
+With a second account configured (config.profiles), each account has its own bot and the page switches
+between them; every request names the account with ?acct=live|sandbox.
 """
 from __future__ import annotations
 
@@ -22,7 +24,7 @@ from urllib.parse import parse_qs, urlparse
 from . import proc
 from .api import ApiError, Client
 from .bot import ny_day
-from .config import Settings, data_dir
+from .config import Settings
 from .marketdata import closed_candles
 from .risk import _frac, assess
 from .strategy import latest
@@ -35,7 +37,7 @@ class Dashboard:
     def __init__(self, cfg: Settings, client: Client | None = None, root: Path | None = None):
         self.cfg = cfg
         self.api = client or Client(cfg.base_url, cfg.api_key)
-        self.root = root or data_dir()  # state, log and pid files
+        self.root = root or cfg.state_file.resolve().parent  # state, log and pid files
         self._sig_cache: tuple[float, dict] = (0.0, {})
         self._lock = threading.Lock()
 
@@ -156,7 +158,9 @@ class Dashboard:
             if self.cfg.live:
                 args.append("--live")
             console = open(self.root / "bot_console.log", "ab")
-            env = dict(os.environ, FP_DATA_DIR=str(self.root))
+            # the bot reads its account from these; with two accounts each bot gets its own
+            env = dict(os.environ, FP_DATA_DIR=str(self.root), FP_API_KEY=self.cfg.api_key,
+                       FP_ACCOUNT_ID=self.cfg.account_id or "", FP_LIVE="1" if self.cfg.live else "0")
             kw = dict(cwd=CODE, env=env, stdout=console, stderr=console, stdin=subprocess.DEVNULL, close_fds=True)
             if sys.platform == "win32":
                 detached = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
@@ -195,17 +199,6 @@ class Dashboard:
             return None
         return self.start_bot(dry=False)["message"]
 
-    def watchdog(self, every: float = 60.0):
-        """Keep the bot running (Railway, server), also after a crash or a restart of the machine."""
-        while True:
-            try:
-                msg = self.watch_once()
-                if msg:
-                    print(time.strftime("%Y-%m-%d %H:%M:%S"), "watchdog:", msg, flush=True)
-            except Exception as e:  # never let the watchdog die
-                print("watchdog fout:", e, flush=True)
-            time.sleep(every)
-
     def close_all(self) -> dict:
         stopped = self.stop_bot()["ok"]
         try:
@@ -237,13 +230,29 @@ def authorized(header: str | None, password: str) -> bool:
     return hmac.compare_digest(given.encode(), password.encode())
 
 
-def serve(cfg: Settings, port: int = 8787, host: str = "127.0.0.1", autostart: bool = False):
+def watch_all(dashes: dict[str, Dashboard], every: float = 60.0):
+    """Keep every account's bot running (Railway, server), also after a crash or a restart of the machine."""
+    while True:
+        for name, dash in dashes.items():
+            try:
+                msg = dash.watch_once()
+                if msg:
+                    print(time.strftime("%Y-%m-%d %H:%M:%S"), f"watchdog ({name}):", msg, flush=True)
+            except Exception as e:  # never let the watchdog die
+                print(f"watchdog fout ({name}):", e, flush=True)
+        time.sleep(every)
+
+
+def serve(cfgs: Settings | dict[str, Settings], port: int = 8787, host: str = "127.0.0.1", autostart: bool = False):
     password = _password()
     if host not in ("127.0.0.1", "localhost") and not password:
         raise SystemExit("Het dashboard openzetten voor internet kan alleen met een wachtwoord: zet DASHBOARD_PASSWORD.")
-    dash = Dashboard(cfg)
+    if isinstance(cfgs, Settings):
+        cfgs = {"live" if cfgs.live else "sandbox": cfgs}
+    dashes = {name: Dashboard(cfg) for name, cfg in cfgs.items()}
+    first = next(iter(dashes))
     if autostart:
-        threading.Thread(target=dash.watchdog, daemon=True).start()
+        threading.Thread(target=watch_all, args=(dashes,), daemon=True).start()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):  # keep the console quiet
@@ -271,6 +280,7 @@ def serve(cfg: Settings, port: int = 8787, host: str = "127.0.0.1", autostart: b
                 return self._json({"ok": True})
             if not self._auth():
                 return
+            dash = dashes.get(parse_qs(u.query).get("acct", [first])[0])
             try:
                 if u.path == "/":
                     body = PAGE.read_bytes()
@@ -278,6 +288,10 @@ def serve(cfg: Settings, port: int = 8787, host: str = "127.0.0.1", autostart: b
                     self.send_header("Content-Type", "text/html; charset=utf-8")
                     self.end_headers()
                     self.wfile.write(body)
+                elif u.path == "/api/profiles":
+                    self._json([{"name": n, "mode": "LIVE" if d.cfg.live else "SANDBOX"} for n, d in dashes.items()])
+                elif dash is None:
+                    self._json({"error": "onbekend account"}, 404)
                 elif u.path == "/api/overview":
                     self._json(dash.overview())
                 elif u.path == "/api/trades":
@@ -303,6 +317,9 @@ def serve(cfg: Settings, port: int = 8787, host: str = "127.0.0.1", autostart: b
             n = int(self.headers.get("Content-Length") or 0)
             data = json.loads(self.rfile.read(n) or b"{}")
             u = urlparse(self.path).path
+            dash = dashes.get(data.get("acct") or first)
+            if dash is None:
+                return self._json({"ok": False, "message": "Onbekend account."}, 404)
             if u == "/api/bot/start":
                 self._json(dash.start_bot(bool(data.get("dry"))))
             elif u == "/api/bot/stop":
@@ -316,8 +333,8 @@ def serve(cfg: Settings, port: int = 8787, host: str = "127.0.0.1", autostart: b
 
     srv = ThreadingHTTPServer((host, port), Handler)
     where = f"http://127.0.0.1:{port}" if host in ("127.0.0.1", "localhost") else f"poort {port} (met wachtwoord)"
-    print(f"Dashboard: {where}   ({'LIVE' if cfg.live else 'SANDBOX'}, account {cfg.account_id}, "
-          f"data in {dash.root}{', bot start automatisch' if autostart else ''})", flush=True)
+    accounts = ", ".join(f"{n}: account {d.cfg.account_id}, data in {d.root}" for n, d in dashes.items())
+    print(f"Dashboard: {where}   ({accounts}{', bots starten automatisch' if autostart else ''})", flush=True)
     print("Dashboard sluiten: Ctrl+C. De bot blijft dan gewoon doorlopen; stop hem met de knop 'Stoppen'.")
     try:
         srv.serve_forever()

@@ -30,6 +30,12 @@ body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--sa
 .pill.on { color: var(--up); background: var(--up-bg); border-color: transparent; }
 .pill.off { color: var(--muted); }
 .acct { color: var(--muted); }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.seg[hidden] { display: none; }
+.seg button { border: 0; border-radius: 0; padding: 4px 12px; font-weight: 600; font-size: 13px; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button.on { background: var(--fg); color: var(--bg); }
+.seg button.on.live { background: var(--down); color: #fff; }
 .spacer { flex: 1; }
 button { font: inherit; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); padding: 6px 12px; cursor: pointer; }
 button:hover { border-color: var(--accent); }
@@ -77,6 +83,7 @@ pre { margin: 0; font-family: var(--mono); font-size: 12px; line-height: 1.45; m
 <div class="wrap">
   <div class="bar">
     <h1>FundedBot</h1>
+    <span class="seg" id="accts" role="group" aria-label="Account" hidden></span>
     <span class="pill" id="mode">…</span>
     <span class="acct" id="acct">account laden…</span>
     <span class="pill off" id="stage">–</span>
@@ -121,14 +128,14 @@ pre { margin: 0; font-family: var(--mono); font-size: 12px; line-height: 1.45; m
   <section class="panel">
     <h2>Noodknop</h2>
     <div class="emergency">
-      <span>Stopt de bot, annuleert alle orders en sluit alle posities op dit account.</span>
+      <span>Stopt de bot, annuleert alle orders en sluit alle posities op <b id="closeacct">dit account</b>.</span>
       <label for="confirm" class="foot">Typ SLUIT:</label>
       <input id="confirm" autocomplete="off">
       <button class="danger" id="closeall" disabled>Alles sluiten</button>
     </div>
   </section>
 
-  <p class="foot">Draait alleen op deze computer. De bot loopt door als je dit dashboard sluit, en houdt de pc wakker zolang hij draait. Gegevens verversen elke 10 seconden. Tijden in jouw tijdzone.</p>
+  <p class="foot">De bot loopt door als je dit dashboard sluit. Elk account heeft zijn eigen bot, met eigen knoppen. Gegevens verversen elke 10 seconden. Tijden in jouw tijdzone.</p>
 </div>
 
 <script>
@@ -137,11 +144,12 @@ const usd = (v, d = 0) => v == null ? "–" : (v < 0 ? "-$" : "$") + Math.abs(v)
 const pct = (v, d = 1) => v == null ? "–" : (v * 100).toFixed(d).replace(".", ",") + "%";
 const time = ms => ms ? new Date(ms).toLocaleString("nl-BE", {day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"}) : "–";
 const STAGE = {evaluation: "challenge", funded: "funded"};
-let O = null;
+let O = null, ACCT = null;  // ACCT: which account the page shows ("live" / "sandbox")
 
-async function get(u) { const r = await fetch(u, {cache: "no-store"}); const j = await r.json(); if (!r.ok) throw new Error(j.error || r.status); return j; }
+const withAcct = u => ACCT ? u + (u.includes("?") ? "&" : "?") + "acct=" + encodeURIComponent(ACCT) : u;
+async function get(u) { const r = await fetch(withAcct(u), {cache: "no-store"}); const j = await r.json(); if (!r.ok) throw new Error(j.error || r.status); return j; }
 async function post(u, body) {
-  const r = await fetch(u, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body || {})});
+  const r = await fetch(u, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({...(body || {}), acct: ACCT})});
   return r.json();
 }
 function flash(text, kind) { $("msgs").innerHTML = `<div class="msg ${kind || ""}">${text}</div>`; setTimeout(() => { if (O) renderMsgs(); }, 6000); }
@@ -169,6 +177,7 @@ function render() {
   const o = O, a = o.account, L = o.levels, r = o.rules, start = a.starting_balance;
   $("mode").textContent = o.mode; $("mode").className = "pill " + (o.mode === "LIVE" ? "live" : "sandbox");
   $("acct").textContent = `${a.name} · ${a.account_number || ""}`;
+  $("closeacct").textContent = `${a.account_number || "dit account"} (${o.mode})`;
   $("stage").textContent = (STAGE[a.stage] || a.stage) + (a.status !== "active" ? ` · ${a.status}` : "");
   const b = o.bot, hb = b.heartbeat_s;
   const stale = b.running && hb != null && hb > 120;
@@ -210,8 +219,9 @@ function render() {
 }
 
 async function loadOverview() {
-  try { O = await get("/api/overview"); render(); }
-  catch (e) { $("msgs").innerHTML = `<div class="msg err">Kan het account niet lezen: ${e.message}</div>`; }
+  const a = ACCT;
+  try { const o = await get("/api/overview"); if (a !== ACCT) return; O = o; render(); }
+  catch (e) { if (a === ACCT) $("msgs").innerHTML = `<div class="msg err">Kan het account niet lezen: ${e.message}</div>`; }
 }
 async function loadSignals() {
   try {
@@ -223,8 +233,10 @@ async function loadSignals() {
   } catch (e) { $("signals").innerHTML = `<tr><td class="empty">Signalen niet beschikbaar: ${e.message}</td></tr>`; }
 }
 async function loadTrades() {
+  const a = ACCT;
   try {
     const t = await get("/api/trades?n=30");
+    if (a !== ACCT) return;
     $("trades").innerHTML = t.length ? `<thead><tr><th>Gesloten</th><th>Kant</th><th class="n">Size</th><th class="n">Entry</th><th class="n">Exit</th><th>Reden</th><th class="n">Netto</th></tr></thead><tbody>` +
       t.map(x => `<tr><td>${time(x.closed_at)}</td><td>${x.side}</td><td class="n">${x.size}</td><td class="n">${usd(x.entry, 1)}</td><td class="n">${usd(x.exit, 1)}</td><td>${x.reason || ""}</td>
         <td class="n ${(x.pnl || 0) >= 0 ? "pos" : "neg"}">${x.pnl == null ? "–" : usd(x.pnl, 2)}</td></tr>`).join("") + "</tbody>"
@@ -232,15 +244,17 @@ async function loadTrades() {
   } catch (e) { $("trades").innerHTML = `<tr><td class="empty">${e.message}</td></tr>`; }
 }
 async function loadLog() {
+  const a = ACCT;
   try {
     const lines = await get("/api/log"), el = $("log"), atEnd = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
+    if (a !== ACCT) return;
     el.textContent = lines.length ? lines.join("") : "nog geen logregels";
     if (atEnd) el.scrollTop = el.scrollHeight;
   } catch (e) {}
 }
 
 $("start").onclick = async () => {
-  if (O && O.mode === "LIVE" && !confirm("De bot LIVE starten, met echt geld?")) return;
+  if (!O || (O.mode === "LIVE" && !confirm("De bot LIVE starten, met echt geld?"))) return;
   const r = await post("/api/bot/start", {dry: false}); flash(r.message, r.ok ? "ok" : "err"); loadOverview();
 };
 $("dry").onclick = async () => { const r = await post("/api/bot/start", {dry: true}); flash(r.message, r.ok ? "ok" : "err"); loadOverview(); };
@@ -251,8 +265,30 @@ $("closeall").onclick = async () => {
   $("confirm").value = ""; $("closeall").disabled = true; flash(r.message, r.ok ? "ok" : "err"); loadOverview(); loadTrades();
 };
 
-loadOverview(); loadSignals(); loadTrades(); loadLog();
-setInterval(loadOverview, 10000); setInterval(loadSignals, 60000); setInterval(loadTrades, 30000); setInterval(loadLog, 5000);
+function showAccount(name) {
+  ACCT = name; O = null;
+  try { localStorage.setItem("fb_acct", name); } catch (e) {}
+  document.querySelectorAll("#accts button").forEach(b => b.classList.toggle("on", b.dataset.acct === name));
+  $("msgs").innerHTML = ""; $("kpis").innerHTML = ""; $("meters").innerHTML = ""; $("position").innerHTML = "";
+  $("trades").innerHTML = ""; $("log").textContent = "laden…"; $("acct").textContent = "account laden…";
+  loadOverview(); loadTrades(); loadLog();
+}
+
+async function init() {
+  let P = [];
+  try { P = await get("/api/profiles"); } catch (e) {}
+  let saved = null;
+  try { saved = localStorage.getItem("fb_acct"); } catch (e) {}
+  if (P.length > 1) {
+    $("accts").innerHTML = P.map(p => `<button type="button" data-acct="${p.name}" class="${p.mode === "LIVE" ? "live" : ""}">${p.mode === "LIVE" ? "Live" : "Sandbox"}</button>`).join("");
+    $("accts").hidden = false;
+    document.querySelectorAll("#accts button").forEach(b => b.onclick = () => { if (b.dataset.acct !== ACCT) showAccount(b.dataset.acct); });
+  }
+  showAccount(P.some(p => p.name === saved) ? saved : (P[0] || {}).name || null);
+  loadSignals();
+  setInterval(loadOverview, 10000); setInterval(loadSignals, 60000); setInterval(loadTrades, 30000); setInterval(loadLog, 5000);
+}
+init();
 </script>
 </body>
 </html>

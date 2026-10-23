@@ -75,7 +75,7 @@ Live gaat alleen met een `fp_live_`-key **én** de vlag `--live`. Laat de bot ee
 
 ## Online (Railway)
 
-De bot kan 24/7 op Railway draaien: het dashboard is dan een website met wachtwoord en houdt de bot zelf draaiende, ook na een crash of herstart. Stappenplan: [`deploy/RAILWAY.md`](deploy/RAILWAY.md). Een eigen Linux-server kan ook: `deploy/setup.sh` en `deploy/upload.ps1`.
+De bot kan 24/7 op Railway draaien: het dashboard is dan een website met wachtwoord en houdt de bot zelf draaiende, ook na een crash of herstart. Met `FP_LIVE_API_KEY` en `FP_LIVE_ACCOUNT_ID` naast een sandbox-key draaien er twee bots (sandbox en live), elk met een eigen status en logboek, en wissel je in het dashboard tussen beide. Stappenplan: [`deploy/RAILWAY.md`](deploy/RAILWAY.md). Een eigen Linux-server kan ook: `deploy/setup.sh` en `deploy/upload.ps1`.
 
 De bot schrijft elk uur een "Hartslag" in het logboek, houdt een Windows-pc wakker zolang hij draait, en weigert te starten als er al een bot draait. Status, logboek en `bot.pid` staan in `FP_DATA_DIR` (standaard de huidige map).
 

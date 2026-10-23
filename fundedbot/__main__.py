@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .api import Client
 from .bot import Bot
-from .config import data_dir, load_settings
+from .config import data_dir, load_settings, profiles
 
 
 def _ts(ms):
@@ -95,7 +95,7 @@ def main():
         return
     if args.command == "dashboard":
         from .dashboard import serve
-        serve(cfg, args.port, args.host, args.autostart)
+        serve(profiles(cfg), args.port, args.host, args.autostart)
         return
     cfg.state_file = Path(args.state) if Path(args.state).is_absolute() else data_dir() / args.state
     logging.basicConfig(

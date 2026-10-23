@@ -107,3 +107,28 @@ def load_settings(live: bool = False, dry_run: bool = False, env_file: str = ".e
         dry_run=dry_run,
         state_file=data_dir() / "state.json",
     )
+
+
+def profiles(primary: Settings) -> dict[str, Settings]:
+    """The account of FP_API_KEY plus an optional second one, each traded by its own bot:
+    FP_LIVE_API_KEY + FP_LIVE_ACCOUNT_ID next to a sandbox key, or FP_SANDBOX_API_KEY + FP_SANDBOX_ACCOUNT_ID
+    next to a live key. The second account keeps its state, log and pid files in a subfolder ('live' or
+    'sandbox') of the data folder; the first one stays where it was."""
+    first = "live" if primary.live else "sandbox"
+    other = "sandbox" if primary.live else "live"
+    out = {first: primary}
+    key = os.environ.get(f"FP_{other.upper()}_API_KEY", "").strip()
+    if key:
+        prefix = "fp_live_" if other == "live" else "fp_test_"
+        if not key.startswith(prefix):
+            raise SystemExit(f"FP_{other.upper()}_API_KEY moet met {prefix} beginnen.")
+        out[other] = Settings(
+            api_key=key,
+            base_url=LIVE_URL if other == "live" else SANDBOX_URL,
+            live=other == "live",
+            account_id=os.environ.get(f"FP_{other.upper()}_ACCOUNT_ID") or None,
+            dry_run=primary.dry_run,
+            state_file=data_dir() / other / "state.json",
+        )
+        out[other].state_file.parent.mkdir(parents=True, exist_ok=True)
+    return dict(sorted(out.items(), key=lambda kv: kv[0] != "live"))  # live first

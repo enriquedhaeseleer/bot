@@ -62,6 +62,15 @@ Open je project op railway.com en klik op de service.
 
 `FP_DATA_DIR=/data` en `FP_AUTOSTART=1` staan al in de Dockerfile.
 
+**Twee accounts tegelijk** (bijvoorbeeld sandbox én je echte challenge): laat de variabelen hierboven op de sandbox staan en voeg toe:
+
+| Naam | Waarde |
+|---|---|
+| `FP_LIVE_API_KEY` | je live key (`fp_live_...`) |
+| `FP_LIVE_ACCOUNT_ID` | het ID van je echte account (zie `python -m fundedbot accounts --live`) |
+
+Er draaien dan twee bots, elk met een eigen map (`/data` voor de sandbox, `/data/live` voor live). In het dashboard wissel je bovenaan tussen **Live** en **Sandbox**; starten, stoppen en de noodknop werken per account. Zet `FP_LIVE` in dit geval **niet** op 1. Laat geen tweede bot (bijvoorbeeld op je pc) op hetzelfde account draaien.
+
 **Volume**: klik met rechts op de service (of gebruik "+ New" → Volume), koppel het aan de service met mount path **`/data`**.
 
 **Networking**: Settings → Networking → **Generate Domain**. Je krijgt een adres zoals `https://fundedbot-production.up.railway.app`.
