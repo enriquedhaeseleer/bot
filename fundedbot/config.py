@@ -50,6 +50,11 @@ CHALLENGE_LEGS = (
 FUNDED_LEGS = (
     leg("wide4h", "wide_bar", "4h", k=2.0, close_frac=0.25, sl=2.0, trail=3.0),
 )
+# Own money (Bitunix): all four legs with real edge, 1% of the current balance per leg. Backtest Feb 2021 -
+# Oct 2026 with the user's Bitunix fee (0.06% taker, 50% partner discount = 0.03%) and holding costs:
+# ~+79% a year, largest fall -40%, 2025 +1% (at the full 0.06%: ~+71%, -41%, 2025 -6%).
+OWN_LEGS = CHALLENGE_LEGS + FUNDED_LEGS
+OWN_RISK = 0.01
 
 
 @dataclass
@@ -81,6 +86,8 @@ class Settings:
     challenge_legs: tuple = CHALLENGE_LEGS
     funded_legs: tuple = FUNDED_LEGS
     risk: RiskParams = field(default_factory=RiskParams)
+    venue: str = "mfp"      # mfp (MyFundedPerps) | bitunix (own money)
+    api_secret: str = ""    # Bitunix signs requests with a secret next to the key
 
 
 def data_dir() -> Path:
@@ -131,4 +138,33 @@ def profiles(primary: Settings) -> dict[str, Settings]:
             state_file=data_dir() / other / "state.json",
         )
         out[other].state_file.parent.mkdir(parents=True, exist_ok=True)
-    return dict(sorted(out.items(), key=lambda kv: kv[0] != "live"))  # live first
+    own = own_settings(primary.dry_run)
+    if own is not None:
+        out["eigen"] = own
+    order = {"live": 0, "eigen": 1, "sandbox": 2}
+    return dict(sorted(out.items(), key=lambda kv: order[kv[0]]))
+
+
+def own_settings(dry_run: bool = False, folder: Path | None = None) -> Settings | None:
+    """Own money on Bitunix (FP_BITUNIX_API_KEY + FP_BITUNIX_API_SECRET), or None when not configured.
+    Its files live in the 'eigen' subfolder (or `folder`, for the bot process the dashboard starts). The very
+    first time that subfolder is made the bot is marked as stopped, so trading with real money only starts
+    after pressing 'Bot starten' in the dashboard."""
+    key = os.environ.get("FP_BITUNIX_API_KEY", "").strip()
+    secret = os.environ.get("FP_BITUNIX_API_SECRET", "").strip()
+    if not key:
+        return None
+    if not secret:
+        raise SystemExit("FP_BITUNIX_API_KEY staat er, maar FP_BITUNIX_API_SECRET ontbreekt.")
+    if folder is None:
+        folder = data_dir() / "eigen"
+        if not folder.exists():
+            folder.mkdir(parents=True)
+            (folder / "bot.disabled").touch()
+    return Settings(
+        api_key=key, api_secret=secret, base_url="https://fapi.bitunix.com", live=True, account_id="bitunix",
+        dry_run=dry_run, state_file=folder / "state.json", venue="bitunix",
+        challenge_legs=OWN_LEGS, funded_legs=OWN_LEGS,
+        risk=RiskParams(challenge_risk=OWN_RISK, funded_risk=OWN_RISK,
+                        keepalive_days_eval=1e9, keepalive_days_funded=1e9),  # no inactivity rule
+    )

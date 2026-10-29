@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .api import Client
 from .bot import Bot
-from .config import data_dir, load_settings, profiles
+from .config import data_dir, load_settings, own_settings, profiles
 
 
 def _ts(ms):
@@ -86,7 +86,12 @@ def main():
     ap.add_argument("--state", default="state.json", help="statusbestand van de bot")
     args = ap.parse_args()
 
-    cfg = load_settings(live=args.live, dry_run=args.dry_run, env_file=args.env)
+    if args.command == "run" and os.environ.get("FP_PROFILE") == "eigen":  # started by the dashboard
+        cfg = own_settings(dry_run=args.dry_run, folder=data_dir())
+        if cfg is None:
+            raise SystemExit("FP_BITUNIX_API_KEY ontbreekt.")
+    else:
+        cfg = load_settings(live=args.live, dry_run=args.dry_run, env_file=args.env)
     if args.command == "trades":
         show_trades(cfg, args.n)
         return

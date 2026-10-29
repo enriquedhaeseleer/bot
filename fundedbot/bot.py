@@ -23,6 +23,7 @@ import pandas as pd
 
 from . import proc
 from .api import ApiError, Client
+from .bitunix import client_for
 from .config import Settings
 from .marketdata import closed_candles
 from .risk import assess, size_trade
@@ -64,6 +65,7 @@ class State:
         self.notified: dict[str, str] = d.get("notified", {})
         self.done: bool = d.get("done", False)
         self.account_id: str | None = d.get("account_id")
+        self.first_equity: float | None = d.get("first_equity")  # equity at the bot's first tick on this account
         self.seen: dict[str, int] = d.get("seen", {})  # leg -> open time (ms) of the last candle evaluated
 
     def save(self):
@@ -75,7 +77,7 @@ class State:
 class Bot:
     def __init__(self, cfg: Settings, client: Client | None = None):
         self.cfg = cfg
-        self.api = client or Client(cfg.base_url, cfg.api_key)
+        self.api = client or client_for(cfg)
         self.state = State(cfg.state_file)
         self.account_id = cfg.account_id or self._pick_account()
         if self.state.account_id not in (None, self.account_id):
@@ -127,7 +129,11 @@ class Bot:
     # ------------------------------------------------------------------ loop
     @property
     def mode(self) -> str:
-        return "dry-run" if self.cfg.dry_run else ("live" if self.cfg.live else "sandbox")
+        if self.cfg.dry_run:
+            return "dry-run"
+        if self.cfg.venue == "bitunix":
+            return "eigen"
+        return "live" if self.cfg.live else "sandbox"
 
     def run(self):
         """Tick until the challenge is done or bot.stop appears next to the state file."""
@@ -187,6 +193,8 @@ class Bot:
         risk = rp.funded_risk if funded else rp.challenge_risk
         rs = assess(account, self.policy, len(st.legs), self._open_risk(), risk, rp,
                     st.trades_today, st.locked_day == today)
+        if st.first_equity is None and rs.equity is not None:
+            st.first_equity = rs.equity
         if self.unknown_position:
             rs.blockers.append("onbekende BTC-positie (niet van de bot)")
 

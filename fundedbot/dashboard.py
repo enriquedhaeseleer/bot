@@ -18,16 +18,23 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import pandas as pd
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import proc
 from .api import ApiError, Client
+from .bitunix import client_for
 from .bot import ny_day
 from .config import Settings
+
+
+def mode_label(cfg: Settings) -> str:
+    return "EIGEN" if cfg.venue == "bitunix" else ("LIVE" if cfg.live else "SANDBOX")
 from .marketdata import closed_candles
 from .risk import _frac, assess
-from .strategy import latest
+from .strategy import latest, trigger
 
 CODE = Path(__file__).resolve().parents[1]
 PAGE = Path(__file__).with_name("dashboard.html")
@@ -36,7 +43,7 @@ PAGE = Path(__file__).with_name("dashboard.html")
 class Dashboard:
     def __init__(self, cfg: Settings, client: Client | None = None, root: Path | None = None):
         self.cfg = cfg
-        self.api = client or Client(cfg.base_url, cfg.api_key)
+        self.api = client or client_for(cfg)
         self.root = root or cfg.state_file.resolve().parent  # state, log and pid files
         self._sig_cache: tuple[float, dict] = (0.0, {})
         self._lock = threading.Lock()
@@ -85,8 +92,15 @@ class Dashboard:
         day_floor = risk.get("daily_loss_floor")
         day_base = float(day_floor) + dll * start if day_floor is not None else None
         stage_legs = cfg.funded_legs if funded else cfg.challenge_legs
+        # every trade on the account (the bot's and by hand) opened since midnight New York
+        midnight = int(pd.Timestamp.now(tz="America/New_York").normalize().timestamp() * 1000)
+        closed = self.api.closed_positions(cfg.account_id, 50)
+        opened = [int(p.get("opened_at") or 0) for p in closed + pos]
+        moments = opened + [int(p.get("closed_at") or 0) for p in closed]
         return {
-            "mode": "LIVE" if cfg.live else "SANDBOX",
+            "mode": mode_label(cfg),
+            "first_equity": st.get("first_equity"),
+            "account_trades": {"today": sum(t >= midnight for t in opened), "last_ms": max(moments) if moments else None},
             "account": {k: acc.get(k) for k in ("name", "account_number", "stage", "status", "starting_balance", "balance")}
             | {"id": cfg.account_id, "equity": eq},
             "rules": {"daily_loss_pct": dll, "max_drawdown_pct": mdd, "profit_target_pct": tgt},
@@ -125,15 +139,25 @@ class Dashboard:
             return cached
         legs = list(self.cfg.challenge_legs) + [lg for lg in self.cfg.funded_legs if lg not in self.cfg.challenge_legs]
         frames = closed_candles(self.cfg.provider, self.cfg.symbol, sorted({"15m"} | {lg.tf for lg in legs}))
-        out = {"price": float(frames["15m"].close.iloc[-1]) if not frames["15m"].empty else None, "legs": []}
+        f15 = frames["15m"]
+        out = {"price": float(f15.close.iloc[-1]) if not f15.empty else None, "legs": []}
         for lg in legs:
-            s = latest(frames[lg.tf], lg)
+            df = frames[lg.tf]
+            s = latest(df, lg)
             stage = "challenge" if lg in self.cfg.challenge_legs else "funded"
             if lg in self.cfg.challenge_legs and lg in self.cfg.funded_legs:
                 stage = "beide"
+            tf = pd.Timedelta(lg.tf.replace("m", "min"))
+            forming, next_close = None, None
+            if not df.empty:
+                next_close = df.index[-1] + 2 * tf  # the candle forming now closes then
+                cur = f15[f15.index >= df.index[-1] + tf]
+                if len(cur):
+                    forming = {"open": float(cur.open.iloc[0]), "high": float(cur.high.max()), "low": float(cur.low.min())}
             out["legs"].append({"name": lg.name, "tf": lg.tf, "stage": stage,
                                 "candle": str(s.candle_time) if s else None, "side": s.side if s else None,
-                                "stop_dist": s.stop_dist if s else None})
+                                "stop_dist": s.stop_dist if s else None, "trigger": trigger(df, lg, forming),
+                                "next_close": str(next_close) if next_close is not None else None})
         self._sig_cache = (time.time(), out)
         return out
 
@@ -155,12 +179,16 @@ class Dashboard:
             args = [sys.executable, "-m", "fundedbot"]
             if dry:
                 args += ["--dry-run", "--state", "state_dryrun.json"]
-            if self.cfg.live:
-                args.append("--live")
             console = open(self.root / "bot_console.log", "ab")
-            # the bot reads its account from these; with two accounts each bot gets its own
-            env = dict(os.environ, FP_DATA_DIR=str(self.root), FP_API_KEY=self.cfg.api_key,
-                       FP_ACCOUNT_ID=self.cfg.account_id or "", FP_LIVE="1" if self.cfg.live else "0")
+            # the bot reads its account from these; with several accounts each bot gets its own
+            env = dict(os.environ, FP_DATA_DIR=str(self.root))
+            if self.cfg.venue == "bitunix":
+                env["FP_PROFILE"] = "eigen"  # Bitunix keys come from FP_BITUNIX_API_KEY / _SECRET
+            else:
+                if self.cfg.live:
+                    args.append("--live")
+                env.update(FP_PROFILE="", FP_API_KEY=self.cfg.api_key, FP_ACCOUNT_ID=self.cfg.account_id or "",
+                           FP_LIVE="1" if self.cfg.live else "0")
             kw = dict(cwd=CODE, env=env, stdout=console, stderr=console, stdin=subprocess.DEVNULL, close_fds=True)
             if sys.platform == "win32":
                 detached = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
@@ -174,7 +202,7 @@ class Dashboard:
             for _ in range(30):  # wait until it has registered itself
                 time.sleep(0.5)
                 if self._running():
-                    mode = "dry-run" if dry else ("live" if self.cfg.live else "sandbox")
+                    mode = "dry-run" if dry else mode_label(self.cfg).lower()
                     return {"ok": True, "message": f"Bot gestart ({mode}). Hij blijft draaien als je het dashboard sluit."}
             return {"ok": False, "message": "De bot startte niet. Kijk in bot_console.log of het logboek."}
 
@@ -289,7 +317,7 @@ def serve(cfgs: Settings | dict[str, Settings], port: int = 8787, host: str = "1
                     self.end_headers()
                     self.wfile.write(body)
                 elif u.path == "/api/profiles":
-                    self._json([{"name": n, "mode": "LIVE" if d.cfg.live else "SANDBOX"} for n, d in dashes.items()])
+                    self._json([{"name": n, "mode": mode_label(d.cfg)} for n, d in dashes.items()])
                 elif dash is None:
                     self._json({"error": "onbekend account"}, 404)
                 elif u.path == "/api/overview":

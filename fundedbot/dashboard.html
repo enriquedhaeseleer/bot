@@ -72,6 +72,7 @@ td.n { font-family: var(--mono); text-align: right; } th.n { text-align: right; 
 td.pos { color: var(--up); } td.neg { color: var(--down); }
 .empty { color: var(--muted); font-size: 13px; }
 .sig { font-weight: 600; } .sig.l { color: var(--up); } .sig.s { color: var(--down); } .sig.z { color: var(--muted); }
+.lvl small { color: var(--muted); font-family: var(--sans); } .lvl.near { color: var(--accent); font-weight: 600; } .why { color: var(--muted); font-size: 12px; white-space: normal; }
 pre { margin: 0; font-family: var(--mono); font-size: 12px; line-height: 1.45; max-height: 340px; overflow: auto; white-space: pre-wrap;
   background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 10px; }
 .emergency { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
@@ -112,6 +113,7 @@ pre { margin: 0; font-family: var(--mono); font-size: 12px; line-height: 1.45; m
   <section class="grid2">
     <div class="panel">
       <h2>Signalen per strategie <span id="price" style="text-transform:none;letter-spacing:0"></span></h2>
+      <p class="why" style="margin:-6px 0 8px">Een strategie stapt in als de candle van zijn timeframe sluit voorbij het niveau. Keltner is bij benadering: de band schuift nog wat mee met de nieuwe close.</p>
       <div class="tablewrap"><table id="signals"></table></div>
     </div>
     <div class="panel">
@@ -175,7 +177,8 @@ function renderMsgs() {
 
 function render() {
   const o = O, a = o.account, L = o.levels, r = o.rules, start = a.starting_balance;
-  $("mode").textContent = o.mode; $("mode").className = "pill " + (o.mode === "LIVE" ? "live" : "sandbox");
+  const own = o.mode === "EIGEN";
+  $("mode").textContent = own ? "EIGEN GELD" : o.mode; $("mode").className = "pill " + (o.mode === "SANDBOX" ? "sandbox" : "live");
   $("acct").textContent = `${a.name} · ${a.account_number || ""}`;
   $("closeacct").textContent = `${a.account_number || "dit account"} (${o.mode})`;
   $("stage").textContent = (STAGE[a.stage] || a.stage) + (a.status !== "active" ? ` · ${a.status}` : "");
@@ -186,16 +189,17 @@ function render() {
   $("botpill").className = "pill " + (b.running && !stale ? "on" : "off");
   $("start").disabled = $("dry").disabled = b.running;
   $("stop").disabled = !b.running;
-  $("start").textContent = o.mode === "LIVE" ? "Bot starten (LIVE)" : "Bot starten";
+  $("start").textContent = o.mode === "LIVE" ? "Bot starten (LIVE)" : own ? "Bot starten (eigen geld)" : "Bot starten";
 
+  if (own) { renderOwn(o); return; }
   const eq = a.equity, prof = eq - start;
   const tgtUsd = L.target_equity - start;
   $("kpis").innerHTML = [
     [usd(a.balance, 2), "balans"],
     [usd(eq, 2), `equity · ${prof >= 0 ? "+" : ""}${usd(prof)} sinds start`],
     [o.today_pnl == null ? "–" : (o.today_pnl >= 0 ? "+" : "") + usd(o.today_pnl), "vandaag (sinds middernacht NY)"],
-    [pct(Math.max(0, prof) / tgtUsd, 0), `naar ${a.stage === "funded" ? "uitbetaling" : "target"} (${usd(L.target_equity)})`],
-    [o.bot_state.trades_today ?? 0, `trades vandaag · laatste ${time(o.bot_state.last_trade_ms)}`],
+    [`${prof >= 0 ? "+" : ""}${pct(prof / start)}`, `van de ${pct(tgtUsd / start, 0)} ${a.stage === "funded" ? "voor de uitbetaling" : "target"} (${usd(L.target_equity)}) · nog ${usd(Math.max(0, L.target_equity - eq))}`],
+    tradesKpi(o),
   ].map(([v, t]) => `<div class="kpi"><b>${v}</b><span>${t}</span></div>`).join("");
 
   const dllUsd = r.daily_loss_pct * start, mddUsd = r.max_drawdown_pct * start;
@@ -206,7 +210,11 @@ function render() {
           `${usd(dayUsed)} van ${usd(dllUsd)}`) +
     meter("Max loss gebruikt", ddUsed, mddUsd, 0.9, `account vervalt onder ${usd(L.dd_floor)}`, `${usd(ddUsed)} van ${usd(mddUsd)}`) +
     meter(a.stage === "funded" ? "Naar de uitbetaling" : "Naar het target", Math.max(0, prof), tgtUsd, null, "", `${usd(Math.max(0, prof))} van ${usd(tgtUsd)}`);
+  renderPosition(o);
+  renderMsgs();
+}
 
+function renderPosition(o) {
   const legs = Object.entries(o.bot_state.legs || {});
   const posRows = o.positions.map(p => `<tr><td>${p.symbol}</td><td>${p.side === "long" ? "▲ long" : "▼ short"}</td><td class="n">${p.size}</td><td class="n">${usd(p.entry_price, 1)}</td><td>${time(p.opened_at)}</td></tr>`).join("");
   const legRows = legs.map(([k, l]) => `<tr><td>${k}</td><td>${l.side > 0 ? "▲ long" : "▼ short"}</td><td class="n">${l.size}</td><td class="n">${usd(l.entry, 1)}</td><td class="n">${usd(l.stop, 1)}</td><td class="n">${l.tp ? usd(l.tp, 1) : "trailing"}</td></tr>`).join("");
@@ -215,6 +223,28 @@ function render() {
                         : `<p class="empty">Geen open positie.</p>`) +
     (legs.length ? `<h2 style="margin-top:14px">Legs van de bot</h2><div class="tablewrap"><table><thead><tr><th>Leg</th><th>Kant</th><th class="n">Size</th><th class="n">Entry</th><th class="n">Stop</th><th class="n">Target</th></tr></thead><tbody>${legRows}</tbody></table></div>
                    <p class="foot" style="margin:8px 0 0">Stop op de server: ${o.bot_state.protect_px ? usd(o.bot_state.protect_px, 1) + " voor " + o.bot_state.protect_size + " BTC" : "–"}</p>` : "");
+}
+
+function tradesKpi(o) {
+  // all trades on the account since midnight New York: the bot's and the ones placed by hand
+  const t = o.account_trades || {};
+  return [t.today ?? 0, `trades vandaag (bot + hand) · laatste ${time(t.last_ms)}`];
+}
+
+function renderOwn(o) {
+  // own money: no prop-firm limits, so no loss meters; the result since the bot's first start instead
+  const a = o.account, eq = a.equity, first = o.first_equity, since = first ? eq - first : null;
+  $("kpis").innerHTML = [
+    [usd(a.balance, 2), "saldo"],
+    [usd(eq, 2), "equity (saldo + open resultaat)"],
+    [since == null ? "–" : (since >= 0 ? "+" : "") + usd(since, 2), first ? `sinds de eerste start (${usd(first)})` : "sinds de eerste start"],
+    [usd(eq - a.balance, 2), "open resultaat"],
+    tradesKpi(o),
+  ].map(([v, t]) => `<div class="kpi"><b>${v}</b><span>${t}</span></div>`).join("");
+  $("meters").innerHTML = `<p style="margin:0 0 8px">Eigen geld op Bitunix: er is geen daily loss of max loss van een prop firm.</p>
+    <p class="foot" style="margin:0">Elke trade riskeert ${pct(o.config.leg_risk, 0)} van je saldo op dat moment, met de stop op de server.
+    Hooguit 5x hefboom in totaal en ${o.config.stage_legs.length} strategieën: ${o.config.stage_legs.map(l => l.name).join(", ")}.</p>`;
+  renderPosition(o);
   renderMsgs();
 }
 
@@ -223,13 +253,28 @@ async function loadOverview() {
   try { const o = await get("/api/overview"); if (a !== ACCT) return; O = o; render(); }
   catch (e) { if (a === ACCT) $("msgs").innerHTML = `<div class="msg err">Kan het account niet lezen: ${e.message}</div>`; }
 }
+function level(px, lvl, side, why) {
+  // a trigger level with how far the price still has to go (side +1: up to it, -1: down to it)
+  if (lvl == null) return `<span class="why">${why || "–"}</span>`;
+  const d = side * (lvl - px) / px;
+  const txt = d <= 0 ? "nu al voorbij" : `${(d * 100).toFixed(2).replace(".", ",")}% ${side > 0 ? "hoger" : "lager"}`;
+  return `<span class="lvl ${d < 0.005 ? "near" : ""}">${usd(lvl)} <small>${txt}</small></span>`;
+}
 async function loadSignals() {
   try {
-    const s = await get("/api/signals");
-    $("price").textContent = s.price ? `· BTC ${usd(s.price)}` : "";
-    $("signals").innerHTML = `<thead><tr><th>Strategie</th><th>Fase</th><th>Laatste candle</th><th>Signaal</th><th class="n">Stopafstand</th></tr></thead><tbody>` +
-      s.legs.map(l => `<tr><td>${l.name}</td><td>${l.stage}</td><td>${l.candle ? new Date(l.candle).toLocaleString("nl-BE", {day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"}) + " (" + l.tf + ")" : "–"}</td>
-        <td class="sig ${l.side > 0 ? "l" : l.side < 0 ? "s" : "z"}">${l.side > 0 ? "▲ long" : l.side < 0 ? "▼ short" : "geen"}</td><td class="n">${usd(l.stop_dist)}</td></tr>`).join("") + "</tbody>";
+    const s = await get("/api/signals"), px = s.price;
+    const hm = t => t ? new Date(t).toLocaleString("nl-BE", {day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"}) : "–";
+    $("price").textContent = px ? `· BTC ${usd(px)}` : "";
+    $("signals").innerHTML = `<thead><tr><th>Strategie</th><th>Long als hij sluit boven</th><th>Short als hij sluit onder</th><th>Volgende close</th><th>Laatste signaal</th></tr></thead><tbody>` +
+      s.legs.map(l => {
+        const t = l.trigger || {};
+        const trend = t.trend ? `<br><span class="why">trendfilter: alleen ${t.trend}</span>` : "";
+        return `<tr><td>${l.name} <span class="why">(${l.tf}, ${l.stage})</span>${trend}</td>
+          <td>${l.trigger ? level(px, t.long, 1, t.why_long) : "–"}</td>
+          <td>${l.trigger ? level(px, t.short, -1, t.why_short) : "–"}</td>
+          <td>${hm(l.next_close)}</td>
+          <td class="sig ${l.side > 0 ? "l" : l.side < 0 ? "s" : "z"}">${l.side > 0 ? "▲ long" : l.side < 0 ? "▼ short" : "geen"}</td></tr>`;
+      }).join("") + "</tbody>";
   } catch (e) { $("signals").innerHTML = `<tr><td class="empty">Signalen niet beschikbaar: ${e.message}</td></tr>`; }
 }
 async function loadTrades() {
@@ -254,7 +299,8 @@ async function loadLog() {
 }
 
 $("start").onclick = async () => {
-  if (!O || (O.mode === "LIVE" && !confirm("De bot LIVE starten, met echt geld?"))) return;
+  if (!O || (O.mode === "LIVE" && !confirm("De bot LIVE starten, op je echte challenge?"))
+      || (O.mode === "EIGEN" && !confirm("De bot starten op Bitunix, met je eigen geld?"))) return;
   const r = await post("/api/bot/start", {dry: false}); flash(r.message, r.ok ? "ok" : "err"); loadOverview();
 };
 $("dry").onclick = async () => { const r = await post("/api/bot/start", {dry: true}); flash(r.message, r.ok ? "ok" : "err"); loadOverview(); };
@@ -280,7 +326,8 @@ async function init() {
   let saved = null;
   try { saved = localStorage.getItem("fb_acct"); } catch (e) {}
   if (P.length > 1) {
-    $("accts").innerHTML = P.map(p => `<button type="button" data-acct="${p.name}" class="${p.mode === "LIVE" ? "live" : ""}">${p.mode === "LIVE" ? "Live" : "Sandbox"}</button>`).join("");
+    const label = {LIVE: "Live", SANDBOX: "Sandbox", EIGEN: "Eigen geld"};
+    $("accts").innerHTML = P.map(p => `<button type="button" data-acct="${p.name}" class="${p.mode !== "SANDBOX" ? "live" : ""}">${label[p.mode] || p.name}</button>`).join("");
     $("accts").hidden = false;
     document.querySelectorAll("#accts button").forEach(b => b.onclick = () => { if (b.dataset.acct !== ACCT) showAccount(b.dataset.acct); });
   }

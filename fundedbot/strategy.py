@@ -197,3 +197,39 @@ def latest(df: pd.DataFrame, lg: Leg) -> LegSignal | None:
     return LegSignal(int(entry[-1]), df.index[-1], float(df.close.iloc[-1]), stop_d,
                      None if tp is None else float(tp[-1]), None if trail is None else float(trail[-1]),
                      bool(ex[-1]))
+
+
+def trigger(df: pd.DataFrame, lg: Leg, forming: dict | None = None) -> dict | None:
+    """Where the NEXT close of this leg's timeframe would give an entry, from its closed candles (and, for the
+    wide-range candle, the candle forming now: dict open/high/low). Keltner is approximate: its band moves a
+    little with the new close. Per side a price level, or None with the reason that side cannot trigger."""
+    if len(df) < MIN_BARS.get(lg.kind, 10 ** 9):
+        return None
+    p, c = lg.p, float(df.close.iloc[-1])
+    if lg.kind == "keltner":
+        m, a = float(ema(df.close, p.get("n", 20)).iloc[-1]), float(atr(df, p.get("atr_n", 14)).iloc[-1])
+        lvl_l, lvl_s = m + p.get("k", 2.0) * a, m - p.get("k", 2.0) * a
+        armed_l, armed_s = c <= lvl_l, c >= lvl_s  # a new cross: the last close must still be inside the band
+        why = "sloot al buiten de band, eerst terug erin"
+    elif lg.kind == "donchian":
+        n = p.get("n", 48)
+        lvl_l, lvl_s = float(df.high.iloc[-n:].max()), float(df.low.iloc[-n:].min())
+        armed_l = c <= float(df.high.rolling(n).max().shift().iloc[-1])
+        armed_s = c >= float(df.low.rolling(n).min().shift().iloc[-1])
+        why = "sloot al buiten het kanaal, eerst terug erin"
+    elif lg.kind == "wide_bar":
+        a = float(atr(df, p.get("atr_n", 14)).iloc[-1])
+        f = forming or {"open": c, "high": c, "low": c}
+        wide = p.get("k", 2.0) * a  # the candle must get this wide and close near its high (low)
+        lvl_l, lvl_s = max(f["low"] + wide, f["open"]), min(f["high"] - wide, f["open"])
+        armed_l = armed_s = True
+        why = ""
+    else:
+        return None
+    filt = p.get("filt", 0)
+    if filt:  # trend filter on the new close: longs only above the EMA, shorts only below
+        e = float(ema(df.close, filt).iloc[-1])
+        lvl_l, lvl_s = max(lvl_l, e), min(lvl_s, e)
+    return {"long": lvl_l if armed_l else None, "short": lvl_s if armed_s else None,
+            "why_long": "" if armed_l else why, "why_short": "" if armed_s else why,
+            "trend": None if not filt else ("long" if c > e else "short")}
