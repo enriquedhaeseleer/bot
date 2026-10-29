@@ -314,6 +314,7 @@ def serve(cfgs: Settings | dict[str, Settings], port: int = 8787, host: str = "1
                     body = PAGE.read_bytes()
                     self.send_response(200)
                     self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Cache-Control", "no-store")  # after a deploy the browser gets the new page
                     self.end_headers()
                     self.wfile.write(body)
                 elif u.path == "/api/profiles":
